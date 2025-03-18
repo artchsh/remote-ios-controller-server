@@ -1,16 +1,21 @@
 from fastapi import FastAPI, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
-import uvicorn, json, threading, vgamepad as vg, os, socket
+import uvicorn, json, threading, vgamepad as vg, os, socket, asyncio
+from contextlib import asynccontextmanager
 
 SERVER_IP = '0.0.0.0'
 SERVER_PORT = 8000
 
-app = FastAPI(title="Remote Controller Websocket API", version="0.1")
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    global main_loop
+    main_loop = asyncio.get_running_loop()
+    yield
 
+app = FastAPI(title="Remote Controller API", version="0.1", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -27,212 +32,124 @@ BUTTON_MAPPING = {
     "start": vg.XUSB_BUTTON.XUSB_GAMEPAD_START,
     "back": vg.XUSB_BUTTON.XUSB_GAMEPAD_BACK,
     "home": vg.XUSB_BUTTON.XUSB_GAMEPAD_GUIDE,
+    **{k: v for k, v in {
+        "up": vg.XUSB_BUTTON.XUSB_GAMEPAD_DPAD_UP,
+        "right": vg.XUSB_BUTTON.XUSB_GAMEPAD_DPAD_RIGHT,
+        "down": vg.XUSB_BUTTON.XUSB_GAMEPAD_DPAD_DOWN,
+        "left": vg.XUSB_BUTTON.XUSB_GAMEPAD_DPAD_LEFT,
+    }.items()}
 }
 
-DPAD_MAPPING = {
-    "up": vg.XUSB_BUTTON.XUSB_GAMEPAD_DPAD_UP,
-    "right": vg.XUSB_BUTTON.XUSB_GAMEPAD_DPAD_RIGHT,
-    "down": vg.XUSB_BUTTON.XUSB_GAMEPAD_DPAD_DOWN,
-    "left": vg.XUSB_BUTTON.XUSB_GAMEPAD_DPAD_LEFT,
-}
-
-# Lock for thread safety
 controller_lock = threading.Lock()
+active_connections = set()
+connections_lock = threading.Lock()
+callback_registered = False
+main_loop = None
 
-# Button state dictionary
-button_states = {
-    "a": " ",
-    "b": " ",
-    "x": " ",
-    "y": " ",
-    "lb": " ",
-    "rb": " ",
-    "start": " ",
-    "back": " ",
-    "home": " ",
-    "up": " ",
-    "right": " ",
-    "down": " ",
-    "left": " ",
-    "lt": " ",
-    "rt": " ",
-    "ls": " ",
-    "rs": " ",
-}
+async def send_message(websocket: WebSocket, msg: dict):
+    try:
+        await websocket.send_text(json.dumps(msg))
+    except Exception as e:
+        print(f"Error sending message: {e}")
 
-# WebSocket connection status
-websocket_connected = False
-
-# ANSI color codes
-class Color:
-    RESET = '\033[0m'
-    RED = '\033[91m'
-    GREEN = '\033[92m'
-    YELLOW = '\033[93m'
-    BLUE = '\033[94m'
-    MAGENTA = '\033[95m'
-    CYAN = '\033[96m'
-    WHITE = '\033[97m'
+def vibration_callback(client, target, large_motor, small_motor, led_number, user_data):
+    message = {"vibration": {"large_motor": large_motor, "small_motor": small_motor}}
+    print(f"Vibration update: {message}")
+    
+    with connections_lock:
+        connections = list(active_connections)
+    
+    for websocket in connections:
+        asyncio.run_coroutine_threadsafe(
+            send_message(websocket, message),
+            main_loop
+        )
 
 def get_local_ip():
-    """Gets the local IP address (Windows only)."""
-    if os.name == 'nt':
-        try:
-            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
             s.connect(("8.8.8.8", 80))
-            ip_address = s.getsockname()[0]
-            s.close()
-            return ip_address
-        except Exception:
-            return "N/A"
-    else:
-        return "N/A (Windows only)"
-
-def update_table():
-    """Updates the console table with button states, IP, and connection status."""
-    os.system('cls' if os.name == 'nt' else 'clear')  # Clear console
-
-    local_ip = get_local_ip()
-    connection_status = Color.GREEN + "Connected" + Color.RESET if websocket_connected else Color.RED + "Disconnected" + Color.RESET
-
-    # Helper function to format cells with padding
-    def format_cell(text, width=4):
-        padding = width - len(text)
-        return " " * (padding // 2) + text + " " * (padding - padding // 2)
-
-    # First row (buttons)
-    button_row1_keys = ["a", "b", "x", "y", "lb", "rb", "start", "back", "home"]
-    button_row1_labels = " | ".join([format_cell(key) for key in button_row1_keys])
-    button_row1_values = " | ".join([format_cell(button_states[key]) for key in button_row1_keys])
-
-    # Second row (d-pad, triggers, sticks)
-    button_row2_keys = ["up", "right", "down", "left", "lt", "rt", "ls", "rs"]
-    button_row2_labels = " | ".join([format_cell(key) for key in button_row2_keys])
-    button_row2_values = " | ".join([format_cell(button_states[key]) for key in button_row2_keys])
-
-    print(Color.CYAN + "------------------------------------------------------------------" + Color.RESET)
-    print(Color.YELLOW + f"| {button_row1_labels} |" + Color.RESET)
-    print(Color.CYAN + "------------------------------------------------------------------" + Color.RESET)
-    print(Color.WHITE + f"| {button_row1_values} |" + Color.RESET)
-    print(Color.CYAN + "------------------------------------------------------------------" + Color.RESET)
-    print(Color.YELLOW + f"| {button_row2_labels} |" + Color.RESET)
-    print(Color.CYAN + "------------------------------------------------------------------" + Color.RESET)
-    print(Color.WHITE + f"| {button_row2_values} |" + Color.RESET)
-    print(Color.CYAN + "------------------------------------------------------------------" + Color.RESET)
-    print(Color.MAGENTA + f"WebSocket Status: {connection_status}" + Color.RESET)
-    print(Color.GREEN + "Author: Artyom Chshyogolev" + Color.RESET)
+            return s.getsockname()[0]
+    except Exception:
+        return "N/A"
 
 @app.get("/")
-async def read_root():
-    return {"message": "Xbox 360 Controller API is running"}
-
-@app.get("/ping")
-async def ping():
-    return {"status": "online"}
+async def root():
+    return {"message": "Controller API operational"}
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
-    global websocket_connected
-    websocket_connected = True
-    update_table()
+    global callback_registered
+    
     await websocket.accept()
+    with connections_lock:
+        active_connections.add(websocket)
+    
+    if not callback_registered:
+        gamepad.register_notification(vibration_callback)
+        callback_registered = True
+        gamepad.update()
+
     try:
         while True:
             data = await websocket.receive_text()
             try:
-                message_data = json.loads(data)
-
-                if "ping" in message_data:
-                    await websocket.send_text(json.dumps({"status": "pong"}))
+                msg = json.loads(data)
+                
+                if msg.get("ping"):
+                    await send_message(websocket, {"status": "pong"})
                     continue
                 
                 with controller_lock:
-                    if "button" in message_data and "action" in message_data:
-                        button = message_data.get("button")
-                        action = message_data.get("action") 
+                    if "button" in msg and "action" in msg:
+                        button, action = msg["button"], msg["action"]
                         
-                        # Handle D-pad (POV hat)
-                        if button in DPAD_MAPPING:
-                            if action == "press":
-                                gamepad.press_button(DPAD_MAPPING[button])
-                                button_states[button] = "X"
-                            elif action == "release":
-                                gamepad.release_button(DPAD_MAPPING[button])
-                                button_states[button] = " "
-                            gamepad.update()
-                            update_table()
-                            await websocket.send_text(json.dumps({"status": "success"}))
-
-                        elif button in BUTTON_MAPPING:
-                            if action == "press":
-                                gamepad.press_button(BUTTON_MAPPING[button])
-                                button_states[button] = "X"
-                            elif action == "release":
-                                gamepad.release_button(BUTTON_MAPPING[button])
-                                button_states[button] = " "
-                            gamepad.update()
-                            update_table()
-                            await websocket.send_text(json.dumps({"status": "success"}))
+                        if button in BUTTON_MAPPING:
+                            (gamepad.press_button if action == "press" else gamepad.release_button)(BUTTON_MAPPING[button])
+                        
+                        elif button in ["lt", "rt"]:
+                            value = 255 if action == "press" else 0
+                            (gamepad.left_trigger if button == "lt" else gamepad.right_trigger)(value)
+                        
+                        elif button in ["ls", "rs"]:
+                            btn = vg.XUSB_BUTTON.XUSB_GAMEPAD_LEFT_THUMB if button == "ls" else vg.XUSB_BUTTON.XUSB_GAMEPAD_RIGHT_THUMB
+                            (gamepad.press_button if action == "press" else gamepad.release_button)(btn)
+                        
                         else:
-                            await websocket.send_text(json.dumps({"status": "error", "message": "Invalid button"}))
-                            
-                        if button in ["lt", "rt"]:
-                            if action == "press":
-                                gamepad.left_trigger(255) if button == "lt" else gamepad.right_trigger(255)
-                                button_states[button] = "X"
-                            elif action == "release":
-                                gamepad.left_trigger(0) if button == "lt" else gamepad.right_trigger(0)
-                                button_states[button] = " "
-                            gamepad.update()
-                            update_table()
-                            await websocket.send_text(json.dumps({"status": "success"}))
-                            
-                        if button in ["rs", "ls"]:
-                            if action == "press":
-                                gamepad.press_button(vg.XUSB_BUTTON.XUSB_GAMEPAD_RIGHT_THUMB) if button == "ls" else gamepad.press_button(vg.XUSB_BUTTON.XUSB_GAMEPAD_LEFT_THUMB)
-                                button_states[button] = "X"
-                            elif action == "release":
-                                gamepad.release_button(vg.XUSB_BUTTON.XUSB_GAMEPAD_RIGHT_THUMB) if button == "ls" else gamepad.release_button(vg.XUSB_BUTTON.XUSB_GAMEPAD_LEFT_THUMB)
-                                button_states[button] = " "
-                            gamepad.update()
-                            update_table()
-                            await websocket.send_text(json.dumps({"status": "success"}))
-
-
-                    elif "stick" in message_data and "x" in message_data and "y" in message_data:
-                        stick = message_data.get("stick")
-                        x_value = message_data.get("x")
-                        y_value = message_data.get("y")
+                            await send_message(websocket, {"status": "error", "message": "Invalid button"})
+                            continue
                         
-                        if stick == "left" or stick == "right":
-                            x_value = max(-32768, min(32767, x_value))
-                            y_value = max(-32768, min(32767, y_value))
-                            
-                            if stick == "left":
-                                gamepad.left_joystick(x_value, -y_value)
-                            else:
-                                gamepad.right_joystick(x_value, -y_value)
-                            gamepad.update()
-                        await websocket.send_text(json.dumps({"status": "success"}))
+                        gamepad.update()
+                        await send_message(websocket, {"status": "success"})
+                    
+                    elif "stick" in msg:
+                        stick = msg["stick"]
+                        x = max(-32768, min(32767, msg.get("x", 0)))
+                        y = max(-32768, min(32767, msg.get("y", 0)))
+                        
+                        if stick == "left":
+                            gamepad.left_joystick(x, -y)
+                        elif stick == "right":
+                            gamepad.right_joystick(x, -y)
+                        
+                        gamepad.update()
+                        await send_message(websocket, {"status": "success"})
+                    
+                    elif "vibration" in msg:
+                        vib = msg["vibration"]
+                        gamepad.set_vibration(vib.get("large_motor", 0), vib.get("small_motor", 0))
+                        gamepad.update()
+                        await send_message(websocket, {"status": "success"})
+            
             except json.JSONDecodeError:
-                await websocket.send_text(json.dumps({"status": "error", "message": "Invalid JSON"}))
-            except Exception as e:
-                print(f"Error processing message: {e}")
-                await websocket.send_text(json.dumps({"status": "error", "message": str(e)}))
+                await send_message(websocket, {"status": "error", "message": "Invalid JSON"})
+    
     except Exception as e:
         print(f"WebSocket error: {e}")
     finally:
-        websocket_connected = False
-        update_table()
+        with connections_lock:
+            active_connections.remove(websocket)
 
 if __name__ == "__main__":
-    local_ip = get_local_ip()
-    os.system('cls' if os.name == 'nt' else 'clear')  # Clear console
-    os.system('title Remote Controller Websocket API')  # Set console title
-    print(Color.CYAN + "---------------------------------" + Color.RESET)
-    print(Color.CYAN + f"Local IP: {local_ip}" + Color.RESET)
-    print(Color.CYAN + "---------------------------------" + Color.RESET)
-    print(Color.CYAN + f"PORT: {SERVER_PORT}" + Color.RESET)
-    print(Color.CYAN + "---------------------------------" + Color.RESET)
-    print(Color.RED + "Press Ctrl+C to exit" + Color.RESET)
+    print(f"\033[96mLocal IP: {get_local_ip()}\nPort: {SERVER_PORT}\033[0m")
     uvicorn.run(app, host=SERVER_IP, port=SERVER_PORT, log_level="critical")
