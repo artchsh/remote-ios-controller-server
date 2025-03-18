@@ -1,10 +1,7 @@
-from fastapi import FastAPI, WebSocket, HTTPException
+from fastapi import FastAPI, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles
 import uvicorn
 import json
-import os
-import time
 import threading
 import vgamepad as vg
 
@@ -29,13 +26,13 @@ gamepad = vg.VX360Gamepad()
 # Xbox 360 button mapping to vGamepad buttons
 BUTTON_MAPPING = {
     "a": vg.XUSB_BUTTON.XUSB_GAMEPAD_A,
-    "b": vg.XUSB_BUTTON.XUSB_GAMEPAD_B,  # swapped B -> B
-    "x": vg.XUSB_BUTTON.XUSB_GAMEPAD_X,  # swapped X -> X
+    "b": vg.XUSB_BUTTON.XUSB_GAMEPAD_B,
+    "x": vg.XUSB_BUTTON.XUSB_GAMEPAD_X,
     "y": vg.XUSB_BUTTON.XUSB_GAMEPAD_Y,
     "lb": vg.XUSB_BUTTON.XUSB_GAMEPAD_LEFT_SHOULDER,
     "rb": vg.XUSB_BUTTON.XUSB_GAMEPAD_RIGHT_SHOULDER,
     "start": vg.XUSB_BUTTON.XUSB_GAMEPAD_START,
-    "select": vg.XUSB_BUTTON.XUSB_GAMEPAD_BACK,
+    "back": vg.XUSB_BUTTON.XUSB_GAMEPAD_BACK,
     "home": vg.XUSB_BUTTON.XUSB_GAMEPAD_GUIDE,
 }
 
@@ -90,6 +87,7 @@ async def websocket_endpoint(websocket: WebSocket):
                     continue
                 
                 with controller_lock:
+                    print(f"Received message: {message_data}")  # Debug log
                     # Handle button press/release
                     if "button" in message_data and "action" in message_data:
                         button = message_data.get("button")
@@ -115,32 +113,42 @@ async def websocket_endpoint(websocket: WebSocket):
                             await websocket.send_text(json.dumps({"status": "success"}))
                         else:
                             await websocket.send_text(json.dumps({"status": "error", "message": "Invalid button"}))
+                            
+                        if button in ["lt", "rt"]:
+                            if action == "press":
+                                gamepad.left_trigger(255) if button == "lt" else gamepad.right_trigger(255)
+                            elif action == "release":
+                                gamepad.left_trigger(0) if button == "lt" else gamepad.right_trigger(0)
+                            gamepad.update()
+                            await websocket.send_text(json.dumps({"status": "success"}))
+                            
+                        if button in ["rs", "ls"]:
+                            if action == "press":
+                                gamepad.press_button(vg.XUSB_BUTTON.XUSB_GAMEPAD_RIGHT_THUMB) if button == "ls" else gamepad.press_button(vg.XUSB_BUTTON.XUSB_GAMEPAD_LEFT_THUMB)
+                            elif action == "release":
+                                gamepad.release_button(vg.XUSB_BUTTON.XUSB_GAMEPAD_RIGHT_THUMB) if button == "ls" else gamepad.release_button(vg.XUSB_BUTTON.XUSB_GAMEPAD_LEFT_THUMB)
+                            gamepad.update()
+                            await websocket.send_text(json.dumps({"status": "success"}))
+
                     
                     # Handle analog stick movement
                     elif "stick" in message_data and "x" in message_data and "y" in message_data:
                         stick = message_data.get("stick")
                         x_value = message_data.get("x")
                         y_value = message_data.get("y")
+                        print(f"1: Received stick: {stick}, x: {x_value}, y: {y_value}")  # Debug log
                         
-                        if stick == "left_stick":
-                            gamepad.left_joystick(x_value, -y_value)
-                        elif stick == "right_stick":
-                            gamepad.right_joystick(x_value, -y_value)
-                        gamepad.update()
+                        if stick == "left" or stick == "right":
+                            x_value = max(-32768, min(32767, x_value))
+                            y_value = max(-32768, min(32767, y_value))
+                            print(f"2: Received stick: {stick}, x: {x_value}, y: {y_value}")  # Debug log
+                            
+                            if stick == "left":
+                                gamepad.left_joystick(x_value, -y_value)
+                            else:
+                                gamepad.right_joystick(x_value, -y_value)
+                            gamepad.update()
                         await websocket.send_text(json.dumps({"status": "success"}))
-                    
-                    # Handle analog triggers
-                    elif "trigger" in message_data and "value" in message_data:
-                        trig = message_data.get("trigger")
-                        val = max(0, min(255, message_data.get("value")))
-                        if trig == "lt":
-                            gamepad.left_trigger(val)
-                        elif trig == "rt":
-                            gamepad.right_trigger(val)
-                        gamepad.update()
-                        await websocket.send_text(json.dumps({"status": "success"}))
-                    else:
-                        await websocket.send_text(json.dumps({"status": "error", "message": "Invalid message format"}))
             except json.JSONDecodeError:
                 await websocket.send_text(json.dumps({"status": "error", "message": "Invalid JSON"}))
             except Exception as e:
@@ -149,15 +157,8 @@ async def websocket_endpoint(websocket: WebSocket):
     except Exception as e:
         print(f"WebSocket error: {e}")
 
-# Create frontend directory if it doesn't exist
-os.makedirs("frontend", exist_ok=True)
-
-# Mount the frontend static files
-app.mount("/app", StaticFiles(directory="frontend", html=True), name="frontend")
-
 if __name__ == "__main__":
     print("Starting Xbox 360 Controller API...")
     print(f"Server running at http://{SERVER_IP}:{SERVER_PORT}")
     print("Make sure vJoy is installed and configured properly")
-    print(f"Access the controller at http://{SERVER_IP}:{SERVER_PORT}/app")
     uvicorn.run(app, host=SERVER_IP, port=SERVER_PORT)
