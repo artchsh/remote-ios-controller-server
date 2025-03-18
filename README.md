@@ -5,10 +5,11 @@ A Python-based WebSocket server that emulates an Xbox 360 controller using the v
 ## Requirements
 
 - Windows OS (required for ViGEm Bus Driver)
-- Python 3.7+
-- [ViGEm Bus Driver](https://github.com/ViGEm/ViGEmBus/releases) must be installed
+- **ViGEm Bus Driver** ([https://github.com/ViGEm/ViGEmBus/releases](https://github.com/ViGEm/ViGEmBus/releases)) **must be installed**
 
-## Dependencies
+**Note:** For users who do not wish to install Python and its dependencies, a pre-compiled `remote-controller-server.exe` is available for download in the releases section of this repository. Only the ViGEm Bus Driver is required to be installed.
+
+## Dependencies (Only required if running from source)
 
 ```
 fastapi==0.104.1
@@ -18,7 +19,7 @@ vgamepad==0.1.0
 python-multipart==0.0.6
 ```
 
-## Installation
+## Installation (Only required if running from source)
 
 1. Clone this repository
 2. Install the required dependencies:
@@ -29,7 +30,13 @@ pip install -r requirements.txt
 
 ## Usage
 
-Run the server:
+**Running the compiled executable (recommended for most users):**
+
+1. Download `remote-controller-server.exe` from the releases section.
+2. Ensure the [ViGEm Bus Driver](https://github.com/ViGEm/ViGEmBus/releases) is installed.
+3. Run `remote-controller-server.exe`.
+
+**Running from source (if Python is installed):**
 
 ```bash
 python main.py
@@ -43,8 +50,8 @@ The server expects JSON data in the following format:
 
 ```js
 {
-    'button': 'lt', 
-    'type': 'button', 
+    'button': 'lt',
+    'type': 'button',
     'action': 'release'
 }
 ```
@@ -55,6 +62,7 @@ The server expects JSON data in the following format:
 - Real-time control via WebSockets
 - Low-latency response
 - Compatible with any WebSocket client that can send the appropriate JSON format
+- **Pre-compiled executable available for easy setup (no Python installation required)**
 
 ## Related Projects
 
