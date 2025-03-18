@@ -160,5 +160,4 @@ async def websocket_endpoint(websocket: WebSocket):
 if __name__ == "__main__":
     print("Starting Xbox 360 Controller API...")
     print(f"Server running at http://{SERVER_IP}:{SERVER_PORT}")
-    print("Make sure vJoy is installed and configured properly")
     uvicorn.run(app, host=SERVER_IP, port=SERVER_PORT)
